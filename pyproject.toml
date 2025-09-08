@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videostove-cli"
+version = "1.0.0"
+description = "Production-ready VideoStove CLI for RunPod GPU instances"
+authors = [
+    {name = "VideoStove Team", email = "support@videostove.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "torchaudio>=2.0.0",
+    "opencv-python>=4.8.0",
+    "Pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "pydub>=0.25.1",
+    "psutil>=5.9.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+]
+
+[project.scripts]
+videostove = "videostove_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/videostove/videostove-cli"
+Repository = "https://github.com/videostove/videostove-cli"
+Issues = "https://github.com/videostove/videostove-cli/issues"
+
+[tool.setuptools.packages.find]
+include = ["videostove_cli*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
