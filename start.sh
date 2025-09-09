@@ -1,16 +1,18 @@
 #!/bin/bash
 set -e
 
-JOB_FILE=$1
+# --- Args ---
+JOB_FILE=$1        # e.g. batch__preset_science.yaml
+DRIVE_FOLDER=$2    # e.g. VideoStove_Test
 
-if [ -z "$JOB_FILE" ]; then
-  echo "Usage: ./start.sh path/to/batch.yaml"
+if [ -z "$JOB_FILE" ] || [ -z "$DRIVE_FOLDER" ]; then
+  echo "Usage: ./start.sh <job.yaml> <DriveFolderName>"
   exit 1
 fi
 
-echo "▶️ Starting VideoStove job with file: $JOB_FILE"
+echo "▶️ Starting job: $JOB_FILE from Drive folder: $DRIVE_FOLDER"
 
-# 1. Setup rclone config from env var
+# --- Rclone Config ---
 mkdir -p /root/.config/rclone
 if [ -z "$RCLONE_CONF_B64" ]; then
   echo "❌ RCLONE_CONF_B64 not set!"
@@ -19,43 +21,51 @@ fi
 echo "$RCLONE_CONF_B64" | base64 -d > /root/.config/rclone/rclone.conf
 echo "✅ rclone config loaded"
 
-# 2. Pull global assets
-echo "⬇️ Pulling global assets..."
-rclone copy gdrive:VideoStove_Test/assets /workspace/assets -P
+# --- Pull global assets + jobs ---
+echo "⬇️ Pulling assets & jobs from gdrive:$DRIVE_FOLDER ..."
+rclone copy gdrive:$DRIVE_FOLDER/assets /workspace/assets -P
+rclone copy gdrive:$DRIVE_FOLDER/jobs /workspace/jobs -P
 
-# 3. Read global options from job file
-PRESET=$(yq '.batch.preset_file' $JOB_FILE)
-OVERLAY=$(yq '.batch.overlay_video' $JOB_FILE)
-FONT=$(yq '.batch.font_file' $JOB_FILE)
-BGM=$(yq '.batch.bg_music' $JOB_FILE)
+# --- Locate YAML ---
+JOB_PATH=/workspace/jobs/$JOB_FILE
+if [ ! -f "$JOB_PATH" ]; then
+  echo "❌ Job file not found: $JOB_PATH"
+  exit 1
+fi
+echo "✅ Using job file: $JOB_PATH"
 
-echo "🎬 Preset: $PRESET"
+# --- Parse global options ---
+PRESET=$(yq '.batch.preset_file' $JOB_PATH)
+OVERLAY=$(yq '.batch.overlay_video' $JOB_PATH)
+FONT=$(yq '.batch.font_file' $JOB_PATH)
+BGM=$(yq '.batch.bg_music' $JOB_PATH)
+
+echo "🎬 Preset:  $PRESET"
 echo "🎬 Overlay: $OVERLAY"
-echo "🎬 Font: $FONT"
-echo "🎬 BGM: $BGM"
+echo "🎬 Font:    $FONT"
+echo "🎬 BGM:     $BGM"
 
-# 4. Process projects
-PROJECT_COUNT=$(yq '.batch.projects | length' $JOB_FILE)
-echo "📂 Found $PROJECT_COUNT projects in batch file"
+# --- Process projects ---
+PROJECT_COUNT=$(yq '.batch.projects | length' $JOB_PATH)
+echo "📂 Found $PROJECT_COUNT projects in $JOB_FILE"
 
 for i in $(seq 0 $((PROJECT_COUNT-1))); do
-  NAME=$(yq ".batch.projects[$i].name" $JOB_FILE)
-  INPUTS=$(yq ".batch.projects[$i].inputs_dir" $JOB_FILE)
-  OUTPUT=$(yq ".batch.projects[$i].output" $JOB_FILE)
+  NAME=$(yq ".batch.projects[$i].name" $JOB_PATH)
+  OUTPUT=$(yq ".batch.projects[$i].output" $JOB_PATH)
 
   echo "➡️ Processing project: $NAME"
 
-  # Pull project data
-  rclone copy gdrive:VideoStove_Test/projects/$NAME /workspace/projects/$NAME -P
+  # Pull project data from Drive
+  rclone copy gdrive:$DRIVE_FOLDER/projects/$NAME /workspace/projects/$NAME -P
 
-  # Run VideoStove CLI (replace with your actual CLI command if needed)
-  python3 videostove_cli.py render $JOB_FILE --project $NAME
+  # Run your renderer (replace with your actual CLI call)
+  python3 /app/videostove_cli.py render $JOB_PATH --project $NAME
 
-  # Upload result back to Drive
-  echo "⬆️ Uploading output for $NAME..."
-  rclone copy $OUTPUT gdrive:VideoStove_Test/output -P
+  # Upload result back to Drive/output
+  echo "⬆️ Uploading output for $NAME ..."
+  rclone copy $OUTPUT gdrive:$DRIVE_FOLDER/output -P
 
   echo "✅ Finished $NAME"
 done
 
-echo "🎉 All projects processed successfully!"
+echo "🎉 All projects complete!"

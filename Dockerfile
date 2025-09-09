@@ -1,43 +1,28 @@
 # VideoStove CLI - Production Docker Image for RunPod GPU instances
 FROM runpod/pytorch:3.10-2.1.2-12.1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
-# Install rclone
-RUN curl -fsSL https://rclone.org/install.sh | bash
+# Install system deps
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3 python3-pip ffmpeg curl jq git unzip wget \
+    && curl -s https://rclone.org/install.sh | bash
 
-# Set up workspace
-WORKDIR /workspace
-ENV PYTHONUNBUFFERED=1 \
-    RCLONE_CONFIG=/workspace/.config/rclone/rclone.conf \
-    PATH="/workspace/.local/bin:$PATH"
+# Install yq (YAML processor)
+RUN wget https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 -O /usr/bin/yq \
+    && chmod +x /usr/bin/yq
 
-# Copy source code
-COPY videostove_cli /workspace/videostove_cli
-COPY run_main.py /workspace/run_main.py
-COPY pyproject.toml /workspace/pyproject.toml
-COPY README.md /workspace/README.md
-COPY entrypoint.sh /workspace/entrypoint.sh
+# Set up working dir
+WORKDIR /app
 
-# Make entrypoint executable
-RUN chmod +x /workspace/entrypoint.sh
+# Copy requirements first (to leverage caching)
+COPY requirements.txt /app/
+RUN pip3 install -r requirements.txt
 
-# Install VideoStove CLI
-RUN python -m pip install --upgrade pip && \
-    pip install -e .
+# Copy the rest of your code
+COPY . /app
 
-# Create default working directory
-RUN mkdir -p /workspace/videostove_root
+# Make start.sh executable
+RUN chmod +x /app/start.sh
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD nvidia-smi -L || exit 1
-
-# Set entrypoint
-ENTRYPOINT ["/workspace/entrypoint.sh"]
-CMD ["wizard"]
+ENTRYPOINT ["bash", "/app/start.sh"]
