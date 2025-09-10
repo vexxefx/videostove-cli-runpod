@@ -1,28 +1,37 @@
-# VideoStove CLI - Production Docker Image for RunPod GPU instances
-FROM runpod/pytorch:3.10-2.1.2-12.1
+# syntax=docker/dockerfile:1
 
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ARG DEBIAN_FRONTEND=noninteractive
 
-# Install system deps
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3 python3-pip ffmpeg curl jq git unzip wget \
-    && curl -s https://rclone.org/install.sh | bash
+# Base tools + ffmpeg + yq + rclone + dos2unix (to fix CRLF on scripts)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv ffmpeg curl jq git unzip wget ca-certificates dos2unix \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl -fsSL https://rclone.org/install.sh | bash \
+  && wget -q https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 -O /usr/bin/yq \
+  && chmod +x /usr/bin/yq
 
-# Install yq (YAML processor)
-RUN wget https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 -O /usr/bin/yq \
-    && chmod +x /usr/bin/yq
+# Environment
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH="/root/.local/bin:${PATH}" \
+    PYTHONPATH="/app" \
+    RUN_MAIN_PATH="/app/run_main.py"
 
-# Set up working dir
 WORKDIR /app
 
-# Copy requirements first (to leverage caching)
-COPY requirements.txt /app/
-RUN pip3 install -r requirements.txt
+# Python deps
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt
 
-# Copy the rest of your code
+# App code
 COPY . /app
 
-# Make start.sh executable
-RUN chmod +x /app/start.sh
+# Ensure scripts are executable and LF-ended
+RUN dos2unix /app/start.sh || true && chmod +x /app/start.sh
 
-ENTRYPOINT ["bash", "/app/start.sh"]
+# Runtime work dirs
+RUN mkdir -p /workspace/assets /workspace/jobs /workspace/projects /workspace/output
+
+ENTRYPOINT ["/app/start.sh"]

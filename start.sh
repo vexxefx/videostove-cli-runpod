@@ -1,71 +1,76 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# --- Args ---
-JOB_FILE=$1        # e.g. batch__preset_science.yaml
-DRIVE_FOLDER=$2    # e.g. VideoStove_Test
+JOB_FILE="${1:-}"
+DRIVE_FOLDER="${2:-}"
 
-if [ -z "$JOB_FILE" ] || [ -z "$DRIVE_FOLDER" ]; then
-  echo "Usage: ./start.sh <job.yaml> <DriveFolderName>"
+if [[ -z "$JOB_FILE" || -z "$DRIVE_FOLDER" ]]; then
+  echo "Usage: /app/start.sh <job.yaml> <DriveFolder>"
   exit 1
 fi
 
-echo "▶️ Starting job: $JOB_FILE from Drive folder: $DRIVE_FOLDER"
+echo "▶️ Starting VideoStove with $JOB_FILE on Drive folder $DRIVE_FOLDER"
 
-# --- Rclone Config ---
+# ---------- rclone config ----------
 mkdir -p /root/.config/rclone
-if [ -z "$RCLONE_CONF_B64" ]; then
-  echo "❌ RCLONE_CONF_B64 not set!"
-  exit 1
-fi
+: "${RCLONE_CONF_B64:?RCLONE_CONF_B64 env var is required}"
 echo "$RCLONE_CONF_B64" | base64 -d > /root/.config/rclone/rclone.conf
-echo "✅ rclone config loaded"
 
-# --- Pull global assets + jobs ---
-echo "⬇️ Pulling assets & jobs from gdrive:$DRIVE_FOLDER ..."
-rclone copy gdrive:$DRIVE_FOLDER/assets /workspace/assets -P
-rclone copy gdrive:$DRIVE_FOLDER/jobs /workspace/jobs -P
+# ---------- workspace layout ----------
+ROOT=/workspace
+JOBS_DIR="$ROOT/jobs"
+ASSETS_DIR="$ROOT/assets"
+PROJECTS_DIR="$ROOT/projects"
+OUTPUT_DIR="$ROOT/output"
+mkdir -p "$JOBS_DIR" "$ASSETS_DIR"/{presets,overlays,fonts,bgmusic} "$PROJECTS_DIR" "$OUTPUT_DIR"
 
-# --- Locate YAML ---
-JOB_PATH=/workspace/jobs/$JOB_FILE
-if [ ! -f "$JOB_PATH" ]; then
-  echo "❌ Job file not found: $JOB_PATH"
-  exit 1
+# ---------- job file ----------
+if [[ ! -f "$JOBS_DIR/$JOB_FILE" ]]; then
+  echo "⬇️ Pulling job file from Drive: gdrive:$DRIVE_FOLDER/jobs/$JOB_FILE"
+  rclone copyto "gdrive:$DRIVE_FOLDER/jobs/$JOB_FILE" "$JOBS_DIR/$JOB_FILE" -P
 fi
-echo "✅ Using job file: $JOB_PATH"
+JOB_PATH="$JOBS_DIR/$JOB_FILE"
 
-# --- Parse global options ---
-PRESET=$(yq '.batch.preset_file' $JOB_PATH)
-OVERLAY=$(yq '.batch.overlay_video' $JOB_PATH)
-FONT=$(yq '.batch.font_file' $JOB_PATH)
-BGM=$(yq '.batch.bg_music' $JOB_PATH)
+# ---------- parse yaml for assets & projects ----------
+PRESET=$(yq -r '.batch.preset_file // ""' "$JOB_PATH")
+OVERLAY=$(yq -r '.batch.overlay_video // ""' "$JOB_PATH")
+FONT=$(yq -r '.batch.font_file // ""' "$JOB_PATH")
+BGM=$(yq -r '.batch.bg_music // ""' "$JOB_PATH")
+mapfile -t PROJECTS < <(yq -r '.batch.projects[].name' "$JOB_PATH")
 
-echo "🎬 Preset:  $PRESET"
-echo "🎬 Overlay: $OVERLAY"
-echo "🎬 Font:    $FONT"
-echo "🎬 BGM:     $BGM"
+pull_asset () {
+  local path="$1" subdir="$2"
+  [[ -z "$path" || "$path" == "null" ]] && return 0
+  local fname; fname="$(basename "$path")"
+  echo "⬇️ Pulling $subdir asset: $fname"
+  rclone copyto "gdrive:$DRIVE_FOLDER/assets/$subdir/$fname" "$ASSETS_DIR/$subdir/$fname" -P || true
+}
+pull_asset "$PRESET"  "presets"
+pull_asset "$OVERLAY" "overlays"
+pull_asset "$FONT"    "fonts"
+pull_asset "$BGM"     "bgmusic"
 
-# --- Process projects ---
-PROJECT_COUNT=$(yq '.batch.projects | length' $JOB_PATH)
-echo "📂 Found $PROJECT_COUNT projects in $JOB_FILE"
-
-for i in $(seq 0 $((PROJECT_COUNT-1))); do
-  NAME=$(yq ".batch.projects[$i].name" $JOB_PATH)
-  OUTPUT=$(yq ".batch.projects[$i].output" $JOB_PATH)
-
-  echo "➡️ Processing project: $NAME"
-
-  # Pull project data from Drive
-  rclone copy gdrive:$DRIVE_FOLDER/projects/$NAME /workspace/projects/$NAME -P
-
-  # Run your renderer (replace with your actual CLI call)
-  python3 /app/videostove_cli.py render $JOB_PATH --project $NAME
-
-  # Upload result back to Drive/output
-  echo "⬆️ Uploading output for $NAME ..."
-  rclone copy $OUTPUT gdrive:$DRIVE_FOLDER/output -P
-
-  echo "✅ Finished $NAME"
+for p in "${PROJECTS[@]}"; do
+  echo "⬇️ Pulling project: $p"
+  rclone copy "gdrive:$DRIVE_FOLDER/projects/$p" "$PROJECTS_DIR/$p" -P --create-empty-src-dirs
 done
 
-echo "🎉 All projects complete!"
+# ---------- render ----------
+echo "🎥 Rendering via CLI (render-batch)…"
+set -x
+python3 -m videostove_cli.cli render-batch \
+  --job "$JOB_PATH" \
+  --assets-root "$ASSETS_DIR" \
+  --projects-root "$PROJECTS_DIR" \
+  --output-root "$OUTPUT_DIR"
+set +x
+
+# ---------- upload ----------
+echo "⬆️ Uploading outputs (.mp4 found under /workspace)…"
+if [[ -d "$OUTPUT_DIR" ]]; then
+  rclone copy "$OUTPUT_DIR" "gdrive:$DRIVE_FOLDER/output" -P || true
+else
+  rclone copy "$ROOT" "gdrive:$DRIVE_FOLDER/output" --include="*.mp4" -P || true
+fi
+
+echo "🎉 All done!"

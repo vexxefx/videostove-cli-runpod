@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from .config import DEFAULT_RCLONE_CONFIG
+# Default rclone config path (replaces deleted config.py)
+DEFAULT_RCLONE_CONFIG = "/root/.config/rclone/rclone.conf"
 from .rclone_io import RcloneError, list_directories, path_exists, get_rclone_version
 
 

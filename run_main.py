@@ -32,7 +32,13 @@ import glob
 import datetime
 import math
 from pathlib import Path
-import webview
+# Conditional webview import for headless/CLI compatibility
+try:
+    import webview
+    HAS_WEBVIEW = True
+except ImportError:
+    HAS_WEBVIEW = False
+    webview = None
 try:
     import tkinter as tk
     from tkinter import filedialog
@@ -296,12 +302,14 @@ def get_gpu_encoder_settings():
     """Get optimal GPU encoder settings based on detected hardware and user preference."""
     gpu_options = CONFIG.get("gpu_encoders", [])
     gpu_mode = CONFIG.get("gpu_mode", "auto")
+    use_gpu = CONFIG.get("use_gpu", True)
     
     print(f"🎮 GPU Selection Mode: {gpu_mode.upper()}")
     print(f"🎮 Available GPU Encoders: {gpu_options}")
+    print(f"🎮 Use GPU Setting: {use_gpu}")
     
-    # Force CPU mode only when explicitly requested
-    if gpu_mode == "cpu":
+    # Force CPU mode when use_gpu is False
+    if not use_gpu or gpu_mode == "cpu":
         print("🎮 Using CPU encoding (libx264)")
         return ['-c:v', 'libx264', '-preset', 'fast', '-crf', '22']
     
@@ -694,7 +702,7 @@ class VideoCreator:
                 if hasattr(api, 'active_processes') and process in api.active_processes:
                     api.active_processes.remove(process)
     
-    def create_motion_clip(self, image_path, output_path, direction, duration, is_first=False, is_last=False):
+    def create_motion_clip(self, image_path, output_path, direction, duration, is_first=False, is_last=False, total_images=None):
         """Create motion clip with extended zoom support for few images."""
         self.log(f"🚀 DEBUG: create_motion_clip called with duration={duration}s, direction={direction}")
         
@@ -734,8 +742,8 @@ class VideoCreator:
                 total_images = len(api_instance.image_files)
 
         video_filter = ""
-        self.log(f"🚀 DEBUG: extended_zoom={extended_zoom}, total_images={total_images}")
-        if False and extended_zoom and total_images > 0 and total_images <= 5:
+        self.log(f"🚀 DEBUG: extended_zoom={extended_zoom}")
+        if extended_zoom:
             self.log(f"🚀 DEBUG: Original duration: {duration}s")
             # Keep the configured duration, don't extend it unnecessarily
             duration = CONFIG.get("image_duration", 8.0)
@@ -4747,6 +4755,15 @@ def main():
     except UnicodeEncodeError:
         print("VideoStove - Videos as Intro Edition")
     
+    # Check for headless mode (CLI/Docker usage)
+    if os.environ.get('HEADLESS') or not HAS_WEBVIEW:
+        if os.environ.get('HEADLESS'):
+            print("🐳 Running in headless mode (Docker/CLI)")
+        elif not HAS_WEBVIEW:
+            print("⚠️ Webview not available - running in headless mode")
+        print("💡 Use the videostove_cli package for CLI operations")
+        return
+    
     # Check dependencies
     if not shutil.which("ffmpeg"):
         print("❌ FFmpeg is required but not found in PATH.")
@@ -4867,6 +4884,184 @@ def run_fallback_mode(api_instance):
     except Exception as e:
         print(f"❌ Fallback mode failed: {e}")
         print("Please try using Python 3.11 or 3.12 instead of 3.13")
+
+
+# CLI Bridge Functions
+def build_visual_chain(inputs, preset_cfg):
+    """
+    Bridge function for CLI: Create video from images/videos
+    
+    Args:
+        inputs: dict with 'root' key pointing to input directory
+        preset_cfg: preset configuration dict
+    
+    Returns:
+        Path to created video file
+    """
+    import tempfile
+    import os
+    
+    input_dir = inputs.get('root')
+    if not input_dir or not os.path.exists(input_dir):
+        raise ValueError(f"Invalid input directory: {input_dir}")
+    
+    # Create temporary output file
+    temp_dir = tempfile.gettempdir()
+    temp_video = os.path.join(temp_dir, f"visual_chain_{os.getpid()}.mp4")
+    
+    # Create VideoCreator instance
+    creator = VideoCreator()
+    
+    # Find media files in the directory
+    image_files, video_files, main_audio, bg_music, overlay_video = creator.find_media_files(input_dir)
+    
+    if not image_files and not video_files:
+        raise ValueError(f"No images or videos found in {input_dir}")
+    
+    # Check for overlay configuration and override with CONFIG overlay path if specified
+    final_overlay_video = overlay_video  # Start with what was found in directory
+    if CONFIG.get("use_overlay", False):
+        overlay_path = CONFIG.get("overlay_path")
+        if overlay_path and os.path.exists(overlay_path):
+            final_overlay_video = overlay_path
+            creator.log(f"🎭 Using overlay from CONFIG: {overlay_path}")
+        elif overlay_video:
+            creator.log(f"🎭 Using overlay found in directory: {overlay_video}")
+        elif CONFIG.get("use_overlay"):
+            creator.log("⚠️ Overlay enabled but no overlay file found")
+    else:
+        final_overlay_video = None  # Overlay disabled
+    
+    # For visual chain, we only create the video part (no audio mixing)
+    # Use a dummy audio file or create silent audio if needed
+    if not main_audio:
+        # Create silent audio track
+        silent_audio = os.path.join(temp_dir, f"silent_{os.getpid()}.mp3")
+        duration = len(image_files) * CONFIG.get("image_duration", 8.0) if image_files else 60
+        cmd = [
+            'ffmpeg', '-y', '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100',
+            '-t', str(duration), '-c:a', 'libmp3lame', silent_audio
+        ]
+        import subprocess
+        subprocess.run(cmd, capture_output=True)
+        main_audio = silent_audio
+    
+    # Create the slideshow/video
+    success = creator.create_slideshow(
+        image_files=image_files,
+        video_files=video_files,
+        main_audio=main_audio,
+        bg_music=None,  # No background music in visual chain
+        overlay_video=final_overlay_video,  # Pass overlay video if configured
+        output_file=temp_video
+    )
+    
+    if not success or not os.path.exists(temp_video):
+        raise RuntimeError("Failed to create visual chain")
+    
+    return temp_video
+
+
+def mix_and_export(video_in, main_audio, bgm, levels, enc, out_path):
+    """
+    Bridge function for CLI: Mix video with audio and export
+    
+    Args:
+        video_in: Path to input video
+        main_audio: Path to main audio (can be None for auto-detect)
+        bgm: Path to background music (can be None)
+        levels: Dict with 'main' and 'bg' volume levels
+        enc: Dict with encoding settings ('use_gpu', 'crf', 'preset')
+        out_path: Output file path
+    
+    Returns:
+        Path to final video file
+    """
+    import subprocess
+    import tempfile
+    import os
+    
+    if not os.path.exists(video_in):
+        raise ValueError(f"Input video not found: {video_in}")
+    
+    # Update CONFIG with encoding settings
+    CONFIG.update({
+        'use_gpu': enc.get('use_gpu', False),
+        'crf': enc.get('crf', 22),
+        'preset': enc.get('preset', 'fast'),
+        'main_audio_vol': levels.get('main', 1.0),
+        'bg_vol': levels.get('bg', 0.15)
+    })
+    
+    # Build FFmpeg command
+    cmd = ['ffmpeg', '-y', '-i', video_in]
+    
+    # Handle audio inputs
+    audio_inputs = []
+    filter_parts = []
+    
+    if main_audio and os.path.exists(main_audio):
+        cmd.extend(['-i', main_audio])
+        filter_parts.append(f"[1:a]volume={levels.get('main', 1.0)}[a_main]")
+        audio_inputs.append('[a_main]')
+    
+    if bgm and os.path.exists(bgm):
+        cmd.extend(['-stream_loop', '-1', '-i', bgm])
+        bgm_index = 2 if main_audio else 1
+        filter_parts.append(f"[{bgm_index}:a]volume={levels.get('bg', 0.15)}[a_bg]")
+        audio_inputs.append('[a_bg]')
+    
+    # Mix audio if multiple sources
+    if len(audio_inputs) > 1:
+        filter_parts.append(f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=first[a_out]")
+        audio_map = '[a_out]'
+    elif len(audio_inputs) == 1:
+        audio_map = audio_inputs[0]
+    else:
+        # No audio, copy video only
+        cmd.extend(['-c:v', 'copy', '-an', out_path])
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+        return out_path
+    
+    # Add filter complex if needed
+    if filter_parts:
+        cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+    
+    # Map streams
+    cmd.extend(['-map', '0:v:0'])
+    if audio_map:
+        cmd.extend(['-map', audio_map])
+    
+    # Add encoding settings using centralized function
+    encoder_settings = get_gpu_encoder_settings()
+    cmd.extend(encoder_settings)
+    
+    # Audio encoding
+    cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+    
+    # Ensure output ends when shortest stream ends (prevents pause at end)
+    cmd.extend(['-shortest'])
+    
+    # Output
+    cmd.append(out_path)
+    
+    # Execute FFmpeg
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg mixing failed: {result.stderr}")
+    
+    if not os.path.exists(out_path):
+        raise RuntimeError(f"Output file not created: {out_path}")
+    
+    return out_path
+
+
+# Make sure AutoCaptioner is available at module level
+# (it's already defined in your run_main.py, so this just ensures it's accessible)
+__all__ = ['CONFIG', 'build_visual_chain', 'mix_and_export', 'AutoCaptioner']
+
 
 if __name__ == '__main__':
     main()
