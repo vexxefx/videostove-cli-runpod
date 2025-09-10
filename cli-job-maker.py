@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-import json, yaml, subprocess
+import json
+import yaml
+import subprocess
 from pathlib import Path
 
 ROOT = Path.cwd() / "tmp_projects"
@@ -19,7 +21,7 @@ def sync_presets(base_folder):
     remote_path = f"gdrive:{base_folder}/assets/presets"
     local_path = ROOT / "assets" / "presets"
     local_path.mkdir(parents=True, exist_ok=True)
-    print(f"⬇️ Pulling presets from {remote_path} ...")
+    print(f"Pulling presets from {remote_path}")
     subprocess.run(["rclone", "copy", remote_path, str(local_path), "-P"], check=True)
     return local_path
 
@@ -48,10 +50,15 @@ def qualifies(files, mode: str):
     if not files:
         return False
     if mode == "slideshow":
-        return has_images(files) and has_audio(files)
+        return has_images(files) and has_audio(files) and not has_videos(files)
     if mode == "montage":
         return has_images(files) and has_videos(files) and has_audio(files)
     return False
+
+def upload_job(job_path, base_folder):
+    remote_jobs_path = f"gdrive:{base_folder}/jobs"
+    print(f"Uploading job to {remote_jobs_path}")
+    subprocess.run(["rclone", "copy", str(job_path), remote_jobs_path, "-P"], check=True)
 
 def main():
     base_folder = input("Enter your Google Drive folder (e.g. VideoStove_Test): ").strip()
@@ -60,29 +67,33 @@ def main():
     preset_dir = sync_presets(base_folder)
     presets = list(preset_dir.glob("*.json"))
     if not presets:
-        print("⚠️ No presets found, exiting")
+        print("No presets found, exiting")
         return
 
     preset_choice = choose("preset", [p.name for p in presets])
     preset_path = preset_dir / preset_choice
 
-    # detect mode
+    # detect mode from preset configuration
     try:
         pdata = json.loads(preset_path.read_text(encoding="utf-8"))
-        mode = pdata.get("mode", "montage")
-    except Exception:
+        # Get the preset name (first key in preset object)
+        preset_name = list(pdata["preset"].keys())[0]
+        preset_config = pdata["preset"][preset_name]
+        mode = preset_config.get("project_type", "montage")
+    except Exception as e:
+        print(f"Error reading preset file: {e}")
         mode = "montage"
 
-    print(f"📌 Using preset {preset_choice} with mode = {mode}")
+    print(f"Using preset {preset_choice} with mode = {mode}")
 
     # 2. List overlays/fonts/bgms
     overlays = [f["Name"] for f in rclone_lsjson(f"{base_folder}/assets/overlays") if not f["IsDir"]]
-    fonts    = [f["Name"] for f in rclone_lsjson(f"{base_folder}/assets/fonts") if not f["IsDir"]]
-    bgms     = [f["Name"] for f in rclone_lsjson(f"{base_folder}/assets/bgmusic") if not f["IsDir"]]
+    fonts = [f["Name"] for f in rclone_lsjson(f"{base_folder}/assets/fonts") if not f["IsDir"]]
+    bgms = [f["Name"] for f in rclone_lsjson(f"{base_folder}/assets/bgmusic") if not f["IsDir"]]
 
     overlay_choice = choose("overlay", overlays, allow_none=True)
-    font_choice    = choose("font", fonts, allow_none=True)
-    bgm_choice     = choose("bgmusic", bgms, allow_none=True)
+    font_choice = choose("font", fonts, allow_none=True)
+    bgm_choice = choose("bgmusic", bgms, allow_none=True)
 
     # 3. List projects
     projects_meta = rclone_lsjson(f"{base_folder}/projects")
@@ -93,16 +104,16 @@ def main():
         try:
             files_meta = rclone_lsjson(f"{base_folder}/projects/{project}")
         except subprocess.CalledProcessError:
-            print(f"⚠️ Could not list {project}, skipping")
+            print(f"Could not list {project}, skipping")
             continue
 
         files = [f["Name"] for f in files_meta if not f["IsDir"]]
 
         if not qualifies(files, mode):
-            print(f"❌ {project} does not qualify for {mode}")
+            print(f"SKIP {project} does not qualify for {mode}")
             continue
 
-        print(f"✅ {project} qualifies")
+        print(f"OK {project} qualifies")
         project_entries.append({
             "name": project,
             "mode": mode,
@@ -111,7 +122,7 @@ def main():
         })
 
     if not project_entries:
-        print("⚠️ No projects qualified, exiting")
+        print("No projects qualified, exiting")
         return
 
     # 4. Build batch job.yaml
@@ -132,7 +143,11 @@ def main():
     with open(job_path, "w") as f:
         yaml.safe_dump(job, f, sort_keys=False)
 
-    print(f"✅ Created batch job {job_path}")
+    print(f"Created batch job {job_path}")
+    
+    # Upload job to Google Drive
+    upload_job(job_path, base_folder)
+    print(f"Job uploaded to Google Drive at {base_folder}/jobs/")
 
 if __name__ == "__main__":
     main()

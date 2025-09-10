@@ -1,0 +1,15 @@
+batch:
+  preset_file: /workspace/assets/presets/single_image.json
+  overlay_video: /workspace/assets/overlays/dust.mp4
+  font_file: /workspace/assets/fonts/Montserrat-Bold.ttf
+  bg_music: null
+  gpu_mode: auto
+  projects:
+  - name: eerie1
+    mode: slideshow
+    inputs_dir: /workspace/projects/eerie1
+    output: /workspace/output/eerie1__single_image.mp4
+  - name: eerie2
+    mode: slideshow
+    inputs_dir: /workspace/projects/eerie2
+    output: /workspace/output/eerie2__single_image.mp4

@@ -1603,19 +1603,15 @@ class VideoCreator:
                             
                             looped_slideshow = os.path.join(work_dir, "slideshow_looped.mp4")
                             
-                            # Simple efficient looping without redundant fade operations
-                            # Fade will be applied later during final assembly
-                            loop_list = os.path.join(work_dir, "loop_list.txt")
-                            loop_files = [slideshow_one_cycle] * loops_needed
-                            if not create_concat_file(loop_files, loop_list):
-                                self.log("❌ Failed to create concat file for slideshow looping")
-                                return False
-                            
-                            if not self.run_ffmpeg([
-                                'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', loop_list,
-                                '-t', str(remaining_time),
-                                '-c', 'copy', looped_slideshow
-                            ], f"Stream copy: Looping slideshow {loops_needed} times"):
+                            # PERFORMANCE OPTIMIZATION: Use stream_loop instead of creating multiple concat entries
+                            # This reduces I/O operations and improves performance significantly
+                            # Old approach: Created 80+ copies of same file in concat list
+                            # New approach: Use FFmpeg stream_loop parameter for efficiency
+                            loop_cmd = [
+                                'ffmpeg', '-y', '-stream_loop', str(loops_needed - 1), '-i', slideshow_one_cycle,
+                                '-c', 'copy', '-t', str(remaining_time), looped_slideshow
+                            ]
+                            if not self.run_ffmpeg(loop_cmd, f"Stream loop: Efficiently looping slideshow {loops_needed} times"):
                                 return False
                             
                             slideshow_base = looped_slideshow
@@ -1961,45 +1957,52 @@ class AutoCaptioner:
                 start_time = time.time()
                 
                 if desired_engine == 'faster':
-                    self.log(f"🚀 Loading faster-whisper model ({self.model_size}) - Enhanced Performance")
+                    self.log(f"Loading faster-whisper model ({self.model_size}) - Enhanced Performance")
                     from faster_whisper import WhisperModel
-                    # Use CPU for better compatibility, faster-whisper is optimized enough
-                    self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+                    import torch
+                    
+                    # Always prefer GPU if available
+                    if torch.cuda.is_available():
+                        device = "cuda"
+                        compute_type = "float16"  # Better for GPU
+                        self.log(f"Using GPU for faster-whisper")
+                    else:
+                        device = "cpu"
+                        compute_type = "int8"
+                        self.log(f"Using CPU for faster-whisper (no GPU available)")
+                    
+                    self.model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
                     self.engine_type = 'faster'
                     
                 else:  # openai-whisper
-                    self.log(f"🚀 Loading openai-whisper model ({self.model_size}) - Standard")
+                    self.log(f"Loading openai-whisper model ({self.model_size}) - Standard")
                     import whisper
                     import torch
                     
-                    # CPU-optimized for small models, GPU for large
-                    if self.model_size in ['tiny', 'base', 'small']:
-                        device = "cpu"
-                        self.log(f"🖥️ Using CPU (optimal for {self.model_size} model)")
-                    else:
-                        device = "cuda" if torch.cuda.is_available() else "cpu"
-                        self.log(f"🎮 Using: {device} (large model)")
+                    # Always prefer GPU if available, regardless of model size
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    self.log(f"Using: {device}")
                     
                     self.model = whisper.load_model(self.model_size, device=device)
                     self.engine_type = 'openai'
                 
                 load_time = time.time() - start_time
-                self.log(f"✅ {self.engine_type}-whisper model loaded in {load_time:.1f} seconds")
+                self.log(f"{self.engine_type}-whisper model loaded in {load_time:.1f} seconds")
                 self.model_loaded = True
                 return True
                 
             except ImportError as e:
                 if desired_engine == 'faster':
-                    self.log("❌ faster-whisper not installed. Install with: pip install faster-whisper")
+                    self.log("faster-whisper not installed. Install with: pip install faster-whisper")
                 else:
-                    self.log("❌ openai-whisper not installed. Install with: pip install openai-whisper")
+                    self.log("openai-whisper not installed. Install with: pip install openai-whisper")
                 return False
             except Exception as e:
-                self.log(f"❌ Failed to load {desired_engine}-whisper model: {e}")
+                self.log(f"Failed to load {desired_engine}-whisper model: {e}")
                 return False
         else:
             # Model already loaded with correct engine
-            self.log(f"✅ {self.engine_type}-whisper model already loaded and ready")
+            self.log(f"{self.engine_type}-whisper model already loaded and ready")
             return True
     
     def transcribe_universal(self, audio_path, word_timestamps=False):
@@ -4965,6 +4968,7 @@ def build_visual_chain(inputs, preset_cfg):
 def mix_and_export(video_in, main_audio, bgm, levels, enc, out_path):
     """
     Bridge function for CLI: Mix video with audio and export
+    OPTIMIZED VERSION: Uses stream copy and efficient audio filtering to prevent 992% CPU usage
     
     Args:
         video_in: Path to input video
@@ -4996,28 +5000,11 @@ def mix_and_export(video_in, main_audio, bgm, levels, enc, out_path):
     # Build FFmpeg command
     cmd = ['ffmpeg', '-y', '-i', video_in]
     
-    # Handle audio inputs
-    audio_inputs = []
-    filter_parts = []
+    # Handle audio inputs and determine approach
+    has_main_audio = main_audio and os.path.exists(main_audio)
+    has_bgm = bgm and os.path.exists(bgm)
     
-    if main_audio and os.path.exists(main_audio):
-        cmd.extend(['-i', main_audio])
-        filter_parts.append(f"[1:a]volume={levels.get('main', 1.0)}[a_main]")
-        audio_inputs.append('[a_main]')
-    
-    if bgm and os.path.exists(bgm):
-        cmd.extend(['-stream_loop', '-1', '-i', bgm])
-        bgm_index = 2 if main_audio else 1
-        filter_parts.append(f"[{bgm_index}:a]volume={levels.get('bg', 0.15)}[a_bg]")
-        audio_inputs.append('[a_bg]')
-    
-    # Mix audio if multiple sources
-    if len(audio_inputs) > 1:
-        filter_parts.append(f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=first[a_out]")
-        audio_map = '[a_out]'
-    elif len(audio_inputs) == 1:
-        audio_map = audio_inputs[0]
-    else:
+    if not has_main_audio and not has_bgm:
         # No audio, copy video only
         cmd.extend(['-c:v', 'copy', '-an', out_path])
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -5025,21 +5012,47 @@ def mix_and_export(video_in, main_audio, bgm, levels, enc, out_path):
             raise RuntimeError(f"FFmpeg failed: {result.stderr}")
         return out_path
     
-    # Add filter complex if needed
-    if filter_parts:
-        cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+    # PERFORMANCE OPTIMIZATION: Use direct audio filters instead of filter_complex
+    # This prevents the 992% CPU usage issue by avoiding complex filter graph processing
     
-    # Map streams
-    cmd.extend(['-map', '0:v:0'])
-    if audio_map:
-        cmd.extend(['-map', audio_map])
+    if has_main_audio and not has_bgm:
+        # Single audio source - use efficient direct audio filter
+        cmd.extend(['-i', main_audio])
+        cmd.extend(['-map', '0:v:0', '-map', '1:a:0'])
+        cmd.extend(['-c:v', 'copy'])  # Stream copy for video - maximum performance
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+        
+        # Use direct audio filter instead of filter_complex for simple volume adjustment
+        main_vol = levels.get('main', 1.0)
+        if main_vol != 1.0:
+            cmd.extend(['-filter:a', f'volume={main_vol}'])
     
-    # Add encoding settings using centralized function
-    encoder_settings = get_gpu_encoder_settings()
-    cmd.extend(encoder_settings)
+    elif has_bgm and not has_main_audio:
+        # BGM only - use efficient direct approach
+        cmd.extend(['-stream_loop', '-1', '-i', bgm])
+        cmd.extend(['-map', '0:v:0', '-map', '1:a:0'])
+        cmd.extend(['-c:v', 'copy'])  # Stream copy for video - maximum performance
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+        
+        # Use direct audio filter for BGM volume
+        bg_vol = levels.get('bg', 0.15)
+        if bg_vol != 1.0:
+            cmd.extend(['-filter:a', f'volume={bg_vol}'])
     
-    # Audio encoding
-    cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+    elif has_main_audio and has_bgm:
+        # Multiple audio sources - need mixing but still optimize
+        cmd.extend(['-i', main_audio])
+        cmd.extend(['-stream_loop', '-1', '-i', bgm])
+        
+        # Use filter_complex only when absolutely necessary (multiple audio mixing)
+        main_vol = levels.get('main', 1.0)
+        bg_vol = levels.get('bg', 0.15)
+        
+        filter_complex = f"[1:a]volume={main_vol}[a_main];[2:a]volume={bg_vol}[a_bg];[a_main][a_bg]amix=inputs=2:duration=first[a_out]"
+        cmd.extend(['-filter_complex', filter_complex])
+        cmd.extend(['-map', '0:v:0', '-map', '[a_out]'])
+        cmd.extend(['-c:v', 'copy'])  # Stream copy for video - maximum performance
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
     
     # Ensure output ends when shortest stream ends (prevents pause at end)
     cmd.extend(['-shortest'])
